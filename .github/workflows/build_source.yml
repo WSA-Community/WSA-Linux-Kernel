@@ -1,0 +1,64 @@
+name: WSA Kernel Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - source
+
+jobs:
+  WSA-Kernel-Build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v2
+        with:
+          submodules: 'recursive'
+      - name: Set up environment
+        run: |
+          sudo apt update -y
+          sudo apt install -y build-essential flex bison libssl-dev libelf-dev git gcc curl make bc bison ca-certificates gnupg libelf-dev lsb-release software-properties-common wget libncurses-dev binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          export LLVM_VERSION=13
+          sudo ./llvm.sh $LLVM_VERSION
+          rm ./llvm.sh
+          sudo ln -s --force /usr/bin/clang-$LLVM_VERSION /usr/bin/clang
+          sudo ln -s --force /usr/bin/ld.lld-$LLVM_VERSION /usr/bin/ld.lld
+          sudo ln -s --force /usr/bin/llvm-objdump-$LLVM_VERSION /usr/bin/llvm-objdump
+          sudo ln -s --force /usr/bin/llvm-ar-$LLVM_VERSION /usr/bin/llvm-ar
+          sudo ln -s --force /usr/bin/llvm-nm-$LLVM_VERSION /usr/bin/llvm-nm
+          sudo ln -s --force /usr/bin/llvm-strip-$LLVM_VERSION /usr/bin/llvm-strip
+          sudo ln -s --force /usr/bin/llvm-objcopy-$LLVM_VERSION /usr/bin/llvm-objcopy
+          sudo ln -s --force /usr/bin/llvm-readelf-$LLVM_VERSION /usr/bin/llvm-readelf
+          sudo ln -s --force /usr/bin/clang++-$LLVM_VERSION /usr/bin/clang++
+      - name: Switch branch to source
+        uses: actions/checkout@v2
+        with:
+         ref: 'source'
+      - name: Build WSA kernel - x86_64
+        run: |
+          sed -i 's/CONFIG_LOCALVERSION=\"-windows-subsystem-for-android\"/CONFIG_LOCALVERSION=\"-WSA\"/g' configs/wsa/config-wsa-5.10
+          make -j$(nproc) LLVM=1 KCONFIG_CONFIG=configs/wsa/config-wsa-5.10
+          mv -f ./arch/x86/boot/bzImage ./arch/x86/boot/kernel
+      - name: Upload artifact - x86_64
+        uses: actions/upload-artifact@v2
+        with:
+          name: WSA-Kernel-x86_64
+          path: './arch/x86/boot/kernel'
+      - name: Build WSA kernel - arm64
+        run: |
+          sed -i 's/CONFIG_LOCALVERSION=\"-windows-subsystem-for-android\"/CONFIG_LOCALVERSION=\"-WSA\"/g' configs/wsa/config-wsa-arm64-5.10
+          make -j$(nproc) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KCONFIG_CONFIG=configs/wsa/config-wsa-arm64-5.10
+          mv -f ./arch/arm64/boot/Image ./arch/arm64/boot/kernel
+      - name: Upload artifact - arm64
+        uses: actions/upload-artifact@v2
+        with:
+          name: WSA-Kernel-arm64
+          path: './arch/arm64/boot/kernel'
+      - name: Cache content
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/arch/x86/boot
+            ~/arch/arm64/boot
