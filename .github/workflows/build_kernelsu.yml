@@ -56,9 +56,3 @@ jobs:
         with:
           name: WSA-Kernel-arm64-Superuser
           path: './arch/arm64/boot/kernel'
-      - name: Cache content
-        uses: actions/cache@v2
-        with:
-          path: |
-            ~/arch/x86/boot
-            ~/arch/arm64/boot
