@@ -38,7 +38,7 @@ jobs:
          ref: 'kernelsu'
       - name: Build WSA kernel - x86_64 (Superuser)
         run: |
-          sed -i 's/CONFIG_LOCALVERSION=\"-windows-subsystem-for-android\"/CONFIG_LOCALVERSION=\"-wsa\"/g' configs/wsa/config-wsa-5.10
+          sed -i 's/CONFIG_LOCALVERSION=\"-windows-subsystem-for-android\"/CONFIG_LOCALVERSION=\"-WSA\"/g' configs/wsa/config-wsa-5.10
           make -j$(nproc) LLVM=1 KCONFIG_CONFIG=configs/wsa/config-wsa-5.10
           mv -f ./arch/x86/boot/bzImage ./arch/x86/boot/kernel
       - name: Upload artifact - x86_64 (Superuser)
@@ -48,7 +48,7 @@ jobs:
           path: './arch/x86/boot/kernel'
       - name: Build WSA kernel - arm64 (Superuser)
         run: |
-          sed -i 's/CONFIG_LOCALVERSION=\"-windows-subsystem-for-android\"/CONFIG_LOCALVERSION=\"-wsa\"/g' configs/wsa/config-wsa-arm64-5.10
+          sed -i 's/CONFIG_LOCALVERSION=\"-windows-subsystem-for-android\"/CONFIG_LOCALVERSION=\"-WSA\"/g' configs/wsa/config-wsa-arm64-5.10
           make -j$(nproc) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KCONFIG_CONFIG=configs/wsa/config-wsa-arm64-5.10
           mv -f ./arch/arm64/boot/Image ./arch/arm64/boot/kernel
       - name: Upload artifact - arm64 (Superuser)
