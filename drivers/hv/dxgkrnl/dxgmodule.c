@@ -15,13 +15,15 @@
 #include <linux/eventfd.h>
 #include <linux/hyperv.h>
 #include <linux/pci.h>
+#include <linux/sync_file.h>
 
 #include "dxgkrnl.h"
+#include "dxgsyncfile.h"
 
 struct dxgglobal *dxgglobal;
 struct device *dxgglobaldev;
 
-#define DXGKRNL_VERSION			0x2108
+#define DXGKRNL_VERSION			0x2111
 #define PCI_VENDOR_ID_MICROSOFT		0x1414
 #define PCI_DEVICE_ID_VIRTUAL_RENDER	0x008E
 
@@ -132,6 +134,40 @@ void dxgglobal_remove_host_event(struct dxghostevent *event)
 	spin_unlock_irq(&dxgglobal->host_event_list_mutex);
 }
 
+void signal_host_cpu_event(struct dxghostevent *eventhdr)
+{
+	struct dxghosteventcpu *event = (struct dxghosteventcpu *)eventhdr;
+
+	if (event->remove_from_list ||
+		event->destroy_after_signal) {
+		list_del(&eventhdr->host_event_list_entry);
+		eventhdr->host_event_list_entry.next = NULL;
+	}
+	if (event->cpu_event) {
+		dev_dbg(dxgglobaldev, "signal cpu event\n");
+		eventfd_signal(event->cpu_event, 1);
+		if (event->destroy_after_signal)
+			eventfd_ctx_put(event->cpu_event);
+	} else {
+		dev_dbg(dxgglobaldev, "signal completion\n");
+		complete(event->completion_event);
+	}
+	if (event->destroy_after_signal) {
+		dev_dbg(dxgglobaldev, "destroying event %p\n",
+			event);
+		vfree(event);
+	}
+}
+
+void signal_dma_fence(struct dxghostevent *eventhdr)
+{
+	struct dxgsyncpoint *event = (struct dxgsyncpoint *)eventhdr;
+
+	event->fence_value++;
+	list_del(&eventhdr->host_event_list_entry);
+	dma_fence_signal(&event->base);
+}
+
 void dxgglobal_signal_host_event(u64 event_id)
 {
 	struct dxghostevent *event;
@@ -145,25 +181,12 @@ void dxgglobal_signal_host_event(u64 event_id)
 		if (event->event_id == event_id) {
 			dev_dbg(dxgglobaldev, "found event to signal %lld\n",
 				    event_id);
-			if (event->remove_from_list ||
-			    event->destroy_after_signal) {
-				list_del(&event->host_event_list_entry);
-				event->host_event_list_entry.next = NULL;
-			}
-			if (event->cpu_event) {
-				dev_dbg(dxgglobaldev, "signal cpu event\n");
-				eventfd_signal(event->cpu_event, 1);
-				if (event->destroy_after_signal)
-					eventfd_ctx_put(event->cpu_event);
-			} else {
-				dev_dbg(dxgglobaldev, "signal completion\n");
-				complete(event->completion_event);
-			}
-			if (event->destroy_after_signal) {
-				dev_dbg(dxgglobaldev, "destroying event %p\n",
-					event);
-				vfree(event);
-			}
+			if (event->event_type == dxghostevent_cpu_event)
+				signal_host_cpu_event(event);
+			else if (event->event_type == dxghostevent_dma_fence)
+				signal_dma_fence(event);
+			else
+				pr_err("Unknown host event type");
 			break;
 		}
 	}
@@ -387,16 +410,19 @@ const struct file_operations dxgk_fops = {
  */
 
 /* vGPU VM bus channel instance ID */
-const int DXGK_VMBUS_CHANNEL_ID_OFFSET	= 192;
+#define DXGK_VMBUS_CHANNEL_ID_OFFSET 192
 /* DXGK_VMBUS_INTERFACE_VERSION (u32) */
-const int DXGK_VMBUS_VERSION_OFFSET	= DXGK_VMBUS_CHANNEL_ID_OFFSET +
-					  sizeof(guid_t);
+#define DXGK_VMBUS_VERSION_OFFSET	(DXGK_VMBUS_CHANNEL_ID_OFFSET + \
+					sizeof(guid_t))
 /* Luid of the virtual GPU on the host (struct winluid) */
-const int DXGK_VMBUS_VGPU_LUID_OFFSET	= DXGK_VMBUS_VERSION_OFFSET +
-					  sizeof(u32);
+#define DXGK_VMBUS_VGPU_LUID_OFFSET	(DXGK_VMBUS_VERSION_OFFSET + \
+					sizeof(u32))
+/* The host caps (dxgk_vmbus_hostcaps) */
+#define DXGK_VMBUS_HOSTCAPS_OFFSET	(DXGK_VMBUS_VGPU_LUID_OFFSET + \
+					sizeof(struct winluid))
 /* The guest writes its capavilities to this adderss */
-const int DXGK_VMBUS_GUESTCAPS_OFFSET	= DXGK_VMBUS_VERSION_OFFSET +
-					  sizeof(u32);
+#define DXGK_VMBUS_GUESTCAPS_OFFSET	(DXGK_VMBUS_VERSION_OFFSET + \
+					sizeof(u32))
 
 struct dxgk_vmbus_guestcaps {
 	union {
@@ -407,6 +433,24 @@ struct dxgk_vmbus_guestcaps {
 		u32 guest_caps;
 	};
 };
+
+/*
+ * The structure defines features, supported by the host.
+ *
+ * map_guest_memory
+ *   Host can map guest memory pages, so the guest can avoid using GPADLs
+ *   to represent existing system memory allocations.
+ */
+struct dxgk_vmbus_hostcaps {
+	union {
+		struct {
+			u32	map_guest_memory	: 1;
+			u32	reserved		: 31;
+		};
+		u32 host_caps;
+	};
+};
+
 
 static int dxg_pci_read_dwords(struct pci_dev *dev, int offset, int size,
 			       void *val)
@@ -434,6 +478,7 @@ static int dxg_pci_probe_device(struct pci_dev *dev,
 	u32 vmbus_interface_ver = DXGK_VMBUS_INTERFACE_VERSION;
 	struct winluid vgpu_luid = {};
 	struct dxgk_vmbus_guestcaps guest_caps = {.wsl2 = 1};
+	struct dxgk_vmbus_hostcaps host_caps = {};
 
 	mutex_lock(&dxgglobal->device_mutex);
 
@@ -461,6 +506,13 @@ static int dxg_pci_probe_device(struct pci_dev *dev,
 					DXGK_VMBUS_INTERFACE_VERSION);
 		if (ret)
 			goto cleanup;
+
+		ret = pci_read_config_dword(dev, DXGK_VMBUS_HOSTCAPS_OFFSET,
+					&host_caps.host_caps);
+		if (ret == 0) {
+			if (host_caps.map_guest_memory)
+				dxgglobal->map_guest_pages_enabled = true;
+		}
 
 		if (dxgglobal->vmbus_ver > DXGK_VMBUS_INTERFACE_VERSION)
 			dxgglobal->vmbus_ver = DXGK_VMBUS_INTERFACE_VERSION;

@@ -415,12 +415,11 @@ int __adis_initial_startup(struct adis *adis)
 	int ret;
 
 	/* check if the device has rst pin low */
-	gpio = devm_gpiod_get_optional(&adis->spi->dev, "reset", GPIOD_ASIS);
+	gpio = devm_gpiod_get_optional(&adis->spi->dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(gpio))
 		return PTR_ERR(gpio);
 
 	if (gpio) {
-		gpiod_set_value_cansleep(gpio, 1);
 		msleep(10);
 		/* bring device out of reset */
 		gpiod_set_value_cansleep(gpio, 0);
@@ -434,6 +433,8 @@ int __adis_initial_startup(struct adis *adis)
 	ret = adis_self_test(adis);
 	if (ret)
 		return ret;
+
+	adis_enable_irq(adis, false);
 
 	if (!adis->data->prod_id_reg)
 		return 0;
@@ -531,7 +532,7 @@ int adis_init(struct adis *adis, struct iio_dev *indio_dev,
 		adis->current_page = 0;
 	}
 
-	return adis_enable_irq(adis, false);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(adis_init);
 

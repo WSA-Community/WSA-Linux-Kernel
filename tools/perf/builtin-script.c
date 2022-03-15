@@ -2483,6 +2483,12 @@ static void perf_script__exit_per_event_dump_stats(struct perf_script *script)
 	}
 }
 
+static void perf_script__exit(struct perf_script *script)
+{
+	perf_thread_map__put(script->threads);
+	perf_cpu_map__put(script->cpus);
+}
+
 static int __cmd_script(struct perf_script *script)
 {
 	int ret;
@@ -3814,11 +3820,15 @@ int cmd_script(int argc, const char **argv)
 		goto out_delete;
 
 	uname(&uts);
-	if (data.is_pipe ||  /* assume pipe_mode indicates native_arch */
-	    !strcmp(uts.machine, session->header.env.arch) ||
-	    (!strcmp(uts.machine, "x86_64") &&
-	     !strcmp(session->header.env.arch, "i386")))
+	if (data.is_pipe) { /* Assume pipe_mode indicates native_arch */
 		native_arch = true;
+	} else if (session->header.env.arch) {
+		if (!strcmp(uts.machine, session->header.env.arch))
+			native_arch = true;
+		else if (!strcmp(uts.machine, "x86_64") &&
+			 !strcmp(session->header.env.arch, "i386"))
+			native_arch = true;
+	}
 
 	script.session = session;
 	script__setup_sample_type(&script);
@@ -3937,6 +3947,7 @@ out_delete:
 
 	perf_evlist__free_stats(session->evlist);
 	perf_session__delete(session);
+	perf_script__exit(&script);
 
 	if (script_started)
 		cleanup_scripting();

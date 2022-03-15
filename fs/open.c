@@ -1004,12 +1004,20 @@ inline struct open_how build_open_how(int flags, umode_t mode)
 
 inline int build_open_flags(const struct open_how *how, struct open_flags *op)
 {
-	int flags = how->flags;
+	u64 flags = how->flags;
+	u64 strip = FMODE_NONOTIFY | O_CLOEXEC;
 	int lookup_flags = 0;
 	int acc_mode = ACC_MODE(flags);
 
-	/* Must never be set by userspace */
-	flags &= ~(FMODE_NONOTIFY | O_CLOEXEC);
+	BUILD_BUG_ON_MSG(upper_32_bits(VALID_OPEN_FLAGS),
+			 "struct open_flags doesn't yet handle flags > 32 bits");
+
+	/*
+	 * Strip flags that either shouldn't be set by userspace like
+	 * FMODE_NONOTIFY or that aren't relevant in determining struct
+	 * open_flags like O_CLOEXEC.
+	 */
+	flags &= ~strip;
 
 	/*
 	 * Older syscalls implicitly clear all of the invalid flags or argument
@@ -1150,7 +1158,7 @@ struct file *filp_open(const char *filename, int flags, umode_t mode)
 	}
 	return file;
 }
-EXPORT_SYMBOL(filp_open);
+EXPORT_SYMBOL_NS(filp_open, ANDROID_GKI_VFS_EXPORT_ONLY);
 
 /* ANDROID: Allow drivers to open only block files from kernel mode */
 struct file *filp_open_block(const char *filename, int flags, umode_t mode)
@@ -1382,7 +1390,7 @@ int generic_file_open(struct inode * inode, struct file * filp)
 	return 0;
 }
 
-EXPORT_SYMBOL(generic_file_open);
+EXPORT_SYMBOL_NS(generic_file_open, ANDROID_GKI_VFS_EXPORT_ONLY);
 
 /*
  * This is used by subsystems that don't want seekable

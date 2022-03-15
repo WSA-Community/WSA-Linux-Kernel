@@ -139,6 +139,7 @@ config ARM64
 	select HAVE_ARCH_JUMP_LABEL
 	select HAVE_ARCH_JUMP_LABEL_RELATIVE
 	select HAVE_ARCH_KASAN if !(ARM64_16K_PAGES && ARM64_VA_BITS_48)
+	select HAVE_ARCH_KASAN_VMALLOC if HAVE_ARCH_KASAN
 	select HAVE_ARCH_KASAN_SW_TAGS if HAVE_ARCH_KASAN
 	select HAVE_ARCH_KASAN_HW_TAGS if (HAVE_ARCH_KASAN && ARM64_MTE)
 	select HAVE_ARCH_KFENCE
@@ -194,6 +195,7 @@ config ARM64
 	select IOMMU_DMA if IOMMU_SUPPORT
 	select IRQ_DOMAIN
 	select IRQ_FORCED_THREADING
+	select KASAN_VMALLOC if KASAN_GENERIC
 	select MODULES_USE_ELF_RELA
 	select NEED_DMA_MAP_STATE
 	select NEED_SG_DMA_LENGTH
@@ -664,6 +666,49 @@ config ARM64_ERRATUM_1508412
 	  Work around the issue by inserting DMB SY barriers around PAR_EL1
 	  register reads and warning KVM users. The DMB barrier is sufficient
 	  to prevent a speculative PAR_EL1 read.
+
+	  If unsure, say Y.
+
+config ARM64_ERRATUM_2051678
+	bool "Cortex-A510: 2051678: disable Hardware Update of the page table's dirty bit"
+	help
+	  This options adds the workaround for ARM Cortex-A510 erratum ARM64_ERRATUM_2051678.
+	  Affected Coretex-A510 might not respect the ordering rules for
+	  hardware update of the page table's dirty bit. The workaround
+	  is to not enable the feature on affected CPUs.
+
+	  If unsure, say Y.
+
+config ARM64_WORKAROUND_TSB_FLUSH_FAILURE
+	bool
+
+config ARM64_ERRATUM_2054223
+	bool "Cortex-A710: 2054223: workaround TSB instruction failing to flush trace"
+	default y
+	select ARM64_WORKAROUND_TSB_FLUSH_FAILURE
+	help
+	  Enable workaround for ARM Cortex-A710 erratum 2054223
+
+	  Affected cores may fail to flush the trace data on a TSB instruction, when
+	  the PE is in trace prohibited state. This will cause losing a few bytes
+	  of the trace cached.
+
+	  Workaround is to issue two TSB consecutively on affected cores.
+
+	  If unsure, say Y.
+
+config ARM64_ERRATUM_2067961
+	bool "Neoverse-N2: 2067961: workaround TSB instruction failing to flush trace"
+	default y
+	select ARM64_WORKAROUND_TSB_FLUSH_FAILURE
+	help
+	  Enable workaround for ARM Neoverse-N2 erratum 2067961
+
+	  Affected cores may fail to flush the trace data on a TSB instruction, when
+	  the PE is in trace prohibited state. This will cause losing a few bytes
+	  of the trace cached.
+
+	  Workaround is to issue two TSB consecutively on affected cores.
 
 	  If unsure, say Y.
 

@@ -32,6 +32,8 @@
 #include <linux/perf_event.h>
 #include <linux/extable.h>
 #include <linux/log2.h>
+
+#include <asm/barrier.h>
 #include <asm/unaligned.h>
 
 #include <trace/hooks/memory.h>
@@ -528,6 +530,7 @@ int bpf_jit_enable   __read_mostly = IS_BUILTIN(CONFIG_BPF_JIT_DEFAULT_ON);
 int bpf_jit_kallsyms __read_mostly = IS_BUILTIN(CONFIG_BPF_JIT_DEFAULT_ON);
 int bpf_jit_harden   __read_mostly;
 long bpf_jit_limit   __read_mostly;
+long bpf_jit_limit_max __read_mostly;
 
 static void
 bpf_prog_ksym_set_addr(struct bpf_prog *prog)
@@ -821,7 +824,8 @@ u64 __weak bpf_jit_alloc_exec_limit(void)
 static int __init bpf_jit_charge_init(void)
 {
 	/* Only used as heuristic here to derive limit. */
-	bpf_jit_limit = min_t(u64, round_up(bpf_jit_alloc_exec_limit() >> 2,
+	bpf_jit_limit_max = bpf_jit_alloc_exec_limit();
+	bpf_jit_limit = min_t(u64, round_up(bpf_jit_limit_max >> 2,
 					    PAGE_SIZE), LONG_MAX);
 	return 0;
 }
@@ -831,7 +835,7 @@ int bpf_jit_charge_modmem(u32 pages)
 {
 	if (atomic_long_add_return(pages, &bpf_jit_current) >
 	    (bpf_jit_limit >> PAGE_SHIFT)) {
-		if (!capable(CAP_SYS_ADMIN)) {
+		if (!bpf_capable()) {
 			atomic_long_sub(pages, &bpf_jit_current);
 			return -EPERM;
 		}
@@ -1384,6 +1388,7 @@ static u64 ___bpf_prog_run(u64 *regs, const struct bpf_insn *insn, u64 *stack)
 		/* Non-UAPI available opcodes. */
 		[BPF_JMP | BPF_CALL_ARGS] = &&JMP_CALL_ARGS,
 		[BPF_JMP | BPF_TAIL_CALL] = &&JMP_TAIL_CALL,
+		[BPF_ST  | BPF_NOSPEC] = &&ST_NOSPEC,
 		[BPF_LDX | BPF_PROBE_MEM | BPF_B] = &&LDX_PROBE_MEM_B,
 		[BPF_LDX | BPF_PROBE_MEM | BPF_H] = &&LDX_PROBE_MEM_H,
 		[BPF_LDX | BPF_PROBE_MEM | BPF_W] = &&LDX_PROBE_MEM_W,
@@ -1399,29 +1404,54 @@ static u64 ___bpf_prog_run(u64 *regs, const struct bpf_insn *insn, u64 *stack)
 select_insn:
 	goto *jumptable[insn->code];
 
-	/* ALU */
-#define ALU(OPCODE, OP)			\
-	ALU64_##OPCODE##_X:		\
-		DST = DST OP SRC;	\
-		CONT;			\
-	ALU_##OPCODE##_X:		\
-		DST = (u32) DST OP (u32) SRC;	\
-		CONT;			\
-	ALU64_##OPCODE##_K:		\
-		DST = DST OP IMM;		\
-		CONT;			\
-	ALU_##OPCODE##_K:		\
-		DST = (u32) DST OP (u32) IMM;	\
+	/* Explicitly mask the register-based shift amounts with 63 or 31
+	 * to avoid undefined behavior. Normally this won't affect the
+	 * generated code, for example, in case of native 64 bit archs such
+	 * as x86-64 or arm64, the compiler is optimizing the AND away for
+	 * the interpreter. In case of JITs, each of the JIT backends compiles
+	 * the BPF shift operations to machine instructions which produce
+	 * implementation-defined results in such a case; the resulting
+	 * contents of the register may be arbitrary, but program behaviour
+	 * as a whole remains defined. In other words, in case of JIT backends,
+	 * the AND must /not/ be added to the emitted LSH/RSH/ARSH translation.
+	 */
+	/* ALU (shifts) */
+#define SHT(OPCODE, OP)					\
+	ALU64_##OPCODE##_X:				\
+		DST = DST OP (SRC & 63);		\
+		CONT;					\
+	ALU_##OPCODE##_X:				\
+		DST = (u32) DST OP ((u32) SRC & 31);	\
+		CONT;					\
+	ALU64_##OPCODE##_K:				\
+		DST = DST OP IMM;			\
+		CONT;					\
+	ALU_##OPCODE##_K:				\
+		DST = (u32) DST OP (u32) IMM;		\
 		CONT;
-
+	/* ALU (rest) */
+#define ALU(OPCODE, OP)					\
+	ALU64_##OPCODE##_X:				\
+		DST = DST OP SRC;			\
+		CONT;					\
+	ALU_##OPCODE##_X:				\
+		DST = (u32) DST OP (u32) SRC;		\
+		CONT;					\
+	ALU64_##OPCODE##_K:				\
+		DST = DST OP IMM;			\
+		CONT;					\
+	ALU_##OPCODE##_K:				\
+		DST = (u32) DST OP (u32) IMM;		\
+		CONT;
 	ALU(ADD,  +)
 	ALU(SUB,  -)
 	ALU(AND,  &)
 	ALU(OR,   |)
-	ALU(LSH, <<)
-	ALU(RSH, >>)
 	ALU(XOR,  ^)
 	ALU(MUL,  *)
+	SHT(LSH, <<)
+	SHT(RSH, >>)
+#undef SHT
 #undef ALU
 	ALU_NEG:
 		DST = (u32) -DST;
@@ -1446,13 +1476,13 @@ select_insn:
 		insn++;
 		CONT;
 	ALU_ARSH_X:
-		DST = (u64) (u32) (((s32) DST) >> SRC);
+		DST = (u64) (u32) (((s32) DST) >> (SRC & 31));
 		CONT;
 	ALU_ARSH_K:
 		DST = (u64) (u32) (((s32) DST) >> IMM);
 		CONT;
 	ALU64_ARSH_X:
-		(*(s64 *) &DST) >>= SRC;
+		(*(s64 *) &DST) >>= (SRC & 63);
 		CONT;
 	ALU64_ARSH_K:
 		(*(s64 *) &DST) >>= IMM;
@@ -1603,7 +1633,21 @@ out:
 	COND_JMP(s, JSGE, >=)
 	COND_JMP(s, JSLE, <=)
 #undef COND_JMP
-	/* STX and ST and LDX*/
+	/* ST, STX and LDX*/
+	ST_NOSPEC:
+		/* Speculation barrier for mitigating Speculative Store Bypass.
+		 * In case of arm64, we rely on the firmware mitigation as
+		 * controlled via the ssbd kernel parameter. Whenever the
+		 * mitigation is enabled, it works for all of the kernel code
+		 * with no need to provide any additional instructions here.
+		 * In case of x86, we use 'lfence' insn for mitigation. We
+		 * reuse preexisting logic from Spectre v1 mitigation that
+		 * happens to produce the required code on x86 for v4 as well.
+		 */
+#ifdef CONFIG_X86
+		barrier_nospec();
+#endif
+		CONT;
 #define LDST(SIZEOP, SIZE)						\
 	STX_MEM_##SIZEOP:						\
 		*(SIZE *)(unsigned long) (DST + insn->off) = SRC;	\
@@ -1737,20 +1781,26 @@ static unsigned int __bpf_prog_ret0_warn(const void *ctx,
 bool bpf_prog_array_compatible(struct bpf_array *array,
 			       const struct bpf_prog *fp)
 {
+	bool ret;
+
 	if (fp->kprobe_override)
 		return false;
 
-	if (!array->aux->type) {
+	spin_lock(&array->aux->owner.lock);
+
+	if (!array->aux->owner.type) {
 		/* There's no owner yet where we could check for
 		 * compatibility.
 		 */
-		array->aux->type  = fp->type;
-		array->aux->jited = fp->jited;
-		return true;
+		array->aux->owner.type  = fp->type;
+		array->aux->owner.jited = fp->jited;
+		ret = true;
+	} else {
+		ret = array->aux->owner.type  == fp->type &&
+		      array->aux->owner.jited == fp->jited;
 	}
-
-	return array->aux->type  == fp->type &&
-	       array->aux->jited == fp->jited;
+	spin_unlock(&array->aux->owner.lock);
+	return ret;
 }
 
 static int bpf_check_tail_call(const struct bpf_prog *fp)

@@ -25,16 +25,8 @@
 #define MLXSW_THERMAL_ZONE_MAX_NAME	16
 #define MLXSW_THERMAL_TEMP_SCORE_MAX	GENMASK(31, 0)
 #define MLXSW_THERMAL_MAX_STATE	10
+#define MLXSW_THERMAL_MIN_STATE	2
 #define MLXSW_THERMAL_MAX_DUTY	255
-/* Minimum and maximum fan allowed speed in percent: from 20% to 100%. Values
- * MLXSW_THERMAL_MAX_STATE + x, where x is between 2 and 10 are used for
- * setting fan speed dynamic minimum. For example, if value is set to 14 (40%)
- * cooling levels vector will be set to 4, 4, 4, 4, 4, 5, 6, 7, 8, 9, 10 to
- * introduce PWM speed in percent: 40, 40, 40, 40, 40, 50, 60. 70, 80, 90, 100.
- */
-#define MLXSW_THERMAL_SPEED_MIN		(MLXSW_THERMAL_MAX_STATE + 2)
-#define MLXSW_THERMAL_SPEED_MAX		(MLXSW_THERMAL_MAX_STATE * 2)
-#define MLXSW_THERMAL_SPEED_MIN_LEVEL	2		/* 20% */
 
 /* External cooling devices, allowed for binding to mlxsw thermal zones. */
 static char * const mlxsw_thermal_external_allowed_cdev[] = {
@@ -635,48 +627,15 @@ static int mlxsw_thermal_set_cur_state(struct thermal_cooling_device *cdev,
 	struct mlxsw_thermal *thermal = cdev->devdata;
 	struct device *dev = thermal->bus_info->dev;
 	char mfsc_pl[MLXSW_REG_MFSC_LEN];
-	unsigned long cur_state, i;
 	int idx;
-	u8 duty;
 	int err;
+
+	if (state > MLXSW_THERMAL_MAX_STATE)
+		return -EINVAL;
 
 	idx = mlxsw_get_cooling_device_idx(thermal, cdev);
 	if (idx < 0)
 		return idx;
-
-	/* Verify if this request is for changing allowed fan dynamical
-	 * minimum. If it is - update cooling levels accordingly and update
-	 * state, if current state is below the newly requested minimum state.
-	 * For example, if current state is 5, and minimal state is to be
-	 * changed from 4 to 6, thermal->cooling_levels[0 to 5] will be changed
-	 * all from 4 to 6. And state 5 (thermal->cooling_levels[4]) should be
-	 * overwritten.
-	 */
-	if (state >= MLXSW_THERMAL_SPEED_MIN &&
-	    state <= MLXSW_THERMAL_SPEED_MAX) {
-		state -= MLXSW_THERMAL_MAX_STATE;
-		for (i = 0; i <= MLXSW_THERMAL_MAX_STATE; i++)
-			thermal->cooling_levels[i] = max(state, i);
-
-		mlxsw_reg_mfsc_pack(mfsc_pl, idx, 0);
-		err = mlxsw_reg_query(thermal->core, MLXSW_REG(mfsc), mfsc_pl);
-		if (err)
-			return err;
-
-		duty = mlxsw_reg_mfsc_pwm_duty_cycle_get(mfsc_pl);
-		cur_state = mlxsw_duty_to_state(duty);
-
-		/* If current fan state is lower than requested dynamical
-		 * minimum, increase fan speed up to dynamical minimum.
-		 */
-		if (state < cur_state)
-			return 0;
-
-		state = cur_state;
-	}
-
-	if (state > MLXSW_THERMAL_MAX_STATE)
-		return -EINVAL;
 
 	/* Normalize the state to the valid speed range. */
 	state = thermal->cooling_levels[state];
@@ -708,7 +667,8 @@ mlxsw_thermal_module_tz_init(struct mlxsw_thermal_module *module_tz)
 							MLXSW_THERMAL_TRIP_MASK,
 							module_tz,
 							&mlxsw_thermal_module_ops,
-							NULL, 0, 0);
+							NULL, 0,
+							module_tz->parent->polling_delay);
 	if (IS_ERR(module_tz->tzdev)) {
 		err = PTR_ERR(module_tz->tzdev);
 		return err;
@@ -830,7 +790,8 @@ mlxsw_thermal_gearbox_tz_init(struct mlxsw_thermal_module *gearbox_tz)
 						MLXSW_THERMAL_TRIP_MASK,
 						gearbox_tz,
 						&mlxsw_thermal_gearbox_ops,
-						NULL, 0, 0);
+						NULL, 0,
+						gearbox_tz->parent->polling_delay);
 	if (IS_ERR(gearbox_tz->tzdev))
 		return PTR_ERR(gearbox_tz->tzdev);
 
@@ -978,8 +939,7 @@ int mlxsw_thermal_init(struct mlxsw_core *core,
 
 	/* Initialize cooling levels per PWM state. */
 	for (i = 0; i < MLXSW_THERMAL_MAX_STATE; i++)
-		thermal->cooling_levels[i] = max(MLXSW_THERMAL_SPEED_MIN_LEVEL,
-						 i);
+		thermal->cooling_levels[i] = max(MLXSW_THERMAL_MIN_STATE, i);
 
 	thermal->polling_delay = bus_info->low_frequency ?
 				 MLXSW_THERMAL_SLOW_POLL_INT :

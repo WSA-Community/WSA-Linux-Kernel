@@ -76,11 +76,13 @@ static const struct snd_pcm_hardware uac_pcm_hardware = {
 };
 
 static void u_audio_set_fback_frequency(enum usb_device_speed speed,
+					struct usb_ep *out_ep,
 					unsigned long long freq,
 					unsigned int pitch,
 					void *buf)
 {
 	u32 ff = 0;
+	const struct usb_endpoint_descriptor *ep_desc;
 
 	/*
 	 * Because the pitch base is 1000000, the final divider here
@@ -108,8 +110,13 @@ static void u_audio_set_fback_frequency(enum usb_device_speed speed,
 		 * byte fromat (that is Q16.16)
 		 *
 		 * ff = (freq << 16) / 8000
+		 *
+		 * Win10 and OSX UAC2 drivers require number of samples per packet
+		 * in order to honor the feedback value.
+		 * Linux snd-usb-audio detects the applied bit-shift automatically.
 		 */
-		freq <<= 4;
+		ep_desc = out_ep->desc;
+		freq <<= 4 + (ep_desc->bInterval - 1);
 	}
 
 	ff = DIV_ROUND_CLOSEST_ULL((freq * pitch), 1953125);
@@ -247,7 +254,7 @@ static void u_audio_iso_fback_complete(struct usb_ep *ep,
 		pr_debug("%s: iso_complete status(%d) %d/%d\n",
 			__func__, status, req->actual, req->length);
 
-	u_audio_set_fback_frequency(audio_dev->gadget->speed,
+	u_audio_set_fback_frequency(audio_dev->gadget->speed, audio_dev->out_ep,
 				    params->c_srate, prm->pitch,
 				    req->buf);
 
@@ -394,8 +401,6 @@ static inline void free_ep(struct uac_rtd_params *prm, struct usb_ep *ep)
 	if (!prm->ep_enabled)
 		return;
 
-	prm->ep_enabled = false;
-
 	audio_dev = uac->audio_dev;
 	params = &audio_dev->params;
 
@@ -412,6 +417,8 @@ static inline void free_ep(struct uac_rtd_params *prm, struct usb_ep *ep)
 			prm->reqs[i] = NULL;
 		}
 	}
+
+	prm->ep_enabled = false;
 
 	if (usb_ep_disable(ep))
 		dev_err(uac->card->dev, "%s:%d Error!\n", __func__, __LINE__);
@@ -506,7 +513,7 @@ int u_audio_start_capture(struct g_audio *audio_dev)
 	 * be meauserd at start of playback
 	 */
 	prm->pitch = 1000000;
-	u_audio_set_fback_frequency(audio_dev->gadget->speed,
+	u_audio_set_fback_frequency(audio_dev->gadget->speed, ep,
 				    params->c_srate, prm->pitch,
 				    req_fback->buf);
 
