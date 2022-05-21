@@ -452,7 +452,7 @@ struct proxy_wifi_netdev_priv {
 	/* Protected by rtnl lock */
 	bool being_deleted;
 	struct connection_state connection;
-	/* Protected by `proxy_wifi_connection_lock` */
+	/* Not protected, but access are sequential */
 	struct proxy_wifi_connect_request *connect_req_ctx;
 	unsigned int request_port;
 	unsigned int notification_port;
@@ -767,8 +767,7 @@ u32 cipher_suites[] = {
 	WLAN_CIPHER_SUITE_CCMP,		WLAN_CIPHER_SUITE_GCMP,
 	WLAN_CIPHER_SUITE_CCMP_256,	WLAN_CIPHER_SUITE_GCMP_256,
 	WLAN_CIPHER_SUITE_AES_CMAC,	WLAN_CIPHER_SUITE_BIP_GMAC_128,
-	WLAN_CIPHER_SUITE_BIP_CMAC_256, WLAN_CIPHER_SUITE_BIP_GMAC_256,
-	WLAN_CIPHER_SUITE_TKIP
+	WLAN_CIPHER_SUITE_BIP_CMAC_256, WLAN_CIPHER_SUITE_BIP_GMAC_256
 };
 
 u32 akm_suites[] = { WLAN_AKM_SUITE_PSK, WLAN_AKM_SUITE_SAE };
@@ -1088,10 +1087,7 @@ static int proxy_wifi_scan(struct wiphy *wiphy,
 
 	priv->scan_request = request;
 	if (!queue_work(proxy_wifi_command_wq, &priv->scan_result))
-	{
-		priv->scan_request = NULL;
 		return -EBUSY;
-	}
 
 	return 0;
 }
@@ -1273,8 +1269,6 @@ static int proxy_wifi_connect(struct wiphy *wiphy, struct net_device *netdev,
 	if (priv->being_deleted || !priv->is_up)
 		return -EBUSY;
 
-	write_lock(&proxy_wifi_connection_lock);
-
 	kfree(priv->connect_req_ctx);
 	priv->connect_req_ctx = NULL;
 	error = build_connect_request_cxt(sme, &priv->connect_req_ctx);
@@ -1282,25 +1276,21 @@ static int proxy_wifi_connect(struct wiphy *wiphy, struct net_device *netdev,
 		wiphy_err(wiphy,
 			  "proxy_wifi: Failed to build the connect request context: %d\n",
 			  error);
-		goto out_release_lock;
+		return error;
 	}
 
-	/* Set the bssid for canceling the connection if needed */
+	/* Set the bssid for the canceling the connection if needed */
+	write_lock(&proxy_wifi_connection_lock);
 	if (sme->bssid)
 		ether_addr_copy(priv->connection.bssid, sme->bssid);
 	else
 		eth_zero_addr(priv->connection.bssid);
-
-	if (!queue_work(proxy_wifi_command_wq, &priv->connect)) {
-		error = -EBUSY;
-		kfree(priv->connect_req_ctx);
-		priv->connect_req_ctx = NULL;
-		goto out_release_lock;
-	}
-
-out_release_lock:
 	write_unlock(&proxy_wifi_connection_lock);
-	return error;
+
+	if (!queue_work(proxy_wifi_command_wq, &priv->connect))
+		return -EBUSY;
+
+	return 0;
 }
 
 /* Acquires and releases the rdev event lock. */
@@ -1310,17 +1300,11 @@ static void proxy_wifi_connect_complete(struct work_struct *work)
 	struct proxy_wifi_netdev_priv *priv =
 		container_of(work, struct proxy_wifi_netdev_priv, connect);
 	u16 status = WLAN_STATUS_UNSPECIFIED_FAILURE;
-	struct proxy_wifi_connect_request *connect_req_ctx = NULL;
 	struct proxy_wifi_connect_response *connect_response = NULL;
 	struct proxy_wifi_msg message = { 0 };
 	u8 connected_bssid[ETH_ALEN];
 
-	write_lock(&proxy_wifi_connection_lock);
-	connect_req_ctx = priv->connect_req_ctx;
-	priv->connect_req_ctx = NULL;
-	write_unlock(&proxy_wifi_connection_lock);
-
-	if (!connect_req_ctx) {
+	if (!priv->connect_req_ctx) {
 		netdev_err(priv->upperdev,
 			   "proxy_wifi: No connection parameters for a connection request\n");
 		goto complete_connect;
@@ -1329,7 +1313,7 @@ static void proxy_wifi_connect_complete(struct work_struct *work)
 	if (!priv->is_up)
 		goto complete_connect;
 
-	message = connect_command(priv->request_port, connect_req_ctx);
+	message = connect_command(priv->request_port, priv->connect_req_ctx);
 
 	if (message.hdr.operation != WIFI_OP_CONNECT_RESPONSE) {
 		netdev_err(priv->upperdev,
@@ -1363,15 +1347,17 @@ static void proxy_wifi_connect_complete(struct work_struct *work)
 	}
 
 complete_connect:
-	read_lock(&proxy_wifi_connection_lock);
+	write_lock(&proxy_wifi_connection_lock);
 	ether_addr_copy(connected_bssid, priv->connection.bssid);
-	read_unlock(&proxy_wifi_connection_lock);
+	write_unlock(&proxy_wifi_connection_lock);
 
 	/* Schedules an event that acquires the rtnl lock. */
 	cfg80211_connect_result(priv->upperdev, connected_bssid, NULL, 0, NULL,
 				0, status, GFP_KERNEL);
 
-	kfree(connect_req_ctx);
+	kfree(priv->connect_req_ctx);
+	priv->connect_req_ctx = NULL;
+
 	kfree(message.body);
 }
 
@@ -1387,12 +1373,9 @@ static void proxy_wifi_cancel_connect(struct net_device *netdev)
 		netdev_info(netdev,
 			    "proxy_wifi: A connection request was canceled\n");
 
-		write_lock(&proxy_wifi_connection_lock);
+		read_lock(&proxy_wifi_connection_lock);
 		ether_addr_copy(bssid, priv->connection.bssid);
-
-		kfree(priv->connect_req_ctx);
-		priv->connect_req_ctx = NULL;
-		write_unlock(&proxy_wifi_connection_lock);
+		read_unlock(&proxy_wifi_connection_lock);
 
 		/* Schedules an event that acquires the rtnl lock. */
 		cfg80211_connect_result(priv->upperdev, bssid, NULL, 0, NULL, 0,

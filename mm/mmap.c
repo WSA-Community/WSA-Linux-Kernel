@@ -3297,9 +3297,10 @@ void exit_mmap(struct mm_struct *mm)
 		(void)__oom_reap_task_mm(mm);
 
 		set_bit(MMF_OOM_SKIP, &mm->flags);
+		mmap_write_lock(mm);
+		mmap_write_unlock(mm);
 	}
 
-	mmap_write_lock(mm);
 	if (mm->locked_vm) {
 		vma = mm->mmap;
 		while (vma) {
@@ -3312,11 +3313,8 @@ void exit_mmap(struct mm_struct *mm)
 	arch_exit_mmap(mm);
 
 	vma = mm->mmap;
-	if (!vma) {
-		/* Can happen if dup_mmap() received an OOM */
-		mmap_write_unlock(mm);
+	if (!vma)	/* Can happen if dup_mmap() received an OOM */
 		return;
-	}
 
 	lru_add_drain();
 	flush_cache_mm(mm);
@@ -3327,14 +3325,16 @@ void exit_mmap(struct mm_struct *mm)
 	free_pgtables(&tlb, vma, FIRST_USER_ADDRESS, USER_PGTABLES_CEILING);
 	tlb_finish_mmu(&tlb, 0, -1);
 
-	/* Walk the list again, actually closing and freeing it. */
+	/*
+	 * Walk the list again, actually closing and freeing it,
+	 * with preemption enabled, without holding any MM locks.
+	 */
 	while (vma) {
 		if (vma->vm_flags & VM_ACCOUNT)
 			nr_accounted += vma_pages(vma);
 		vma = remove_vma(vma);
 		cond_resched();
 	}
-	mmap_write_unlock(mm);
 	vm_unacct_memory(nr_accounted);
 }
 

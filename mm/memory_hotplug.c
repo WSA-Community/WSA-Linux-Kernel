@@ -764,8 +764,8 @@ static inline struct zone *default_zone_for_pfn(int nid, unsigned long start_pfn
 	return movable_node_enabled ? movable_zone : kernel_zone;
 }
 
-struct zone *zone_for_pfn_range(int online_type, int nid,
-		unsigned long start_pfn, unsigned long nr_pages)
+struct zone * zone_for_pfn_range(int online_type, int nid, unsigned start_pfn,
+		unsigned long nr_pages)
 {
 	if (online_type == MMOP_ONLINE_KERNEL)
 		return default_kernel_zone_for_pfn(nid, start_pfn, nr_pages);
@@ -1135,6 +1135,9 @@ int add_memory_subsection(int nid, u64 start, u64 size)
 	struct mhp_params params = { .pgprot = PAGE_KERNEL };
 	struct resource *res;
 	int ret;
+
+	if (size == memory_block_size_bytes())
+		return add_memory(nid, start, size, MHP_NONE);
 
 	if (!IS_ALIGNED(start, SUBSECTION_SIZE) ||
 	    !IS_ALIGNED(size, SUBSECTION_SIZE)) {
@@ -1834,6 +1837,9 @@ EXPORT_SYMBOL_GPL(remove_memory);
 
 int remove_memory_subsection(int nid, u64 start, u64 size)
 {
+	if (size ==  memory_block_size_bytes())
+		return remove_memory(nid, start, size);
+
 	if (!IS_ALIGNED(start, SUBSECTION_SIZE) ||
 	    !IS_ALIGNED(size, SUBSECTION_SIZE)) {
 		pr_err("%s: start 0x%llx size 0x%llx not aligned to subsection size\n",

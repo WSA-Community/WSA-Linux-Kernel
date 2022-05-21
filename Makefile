@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0
 VERSION = 5
 PATCHLEVEL = 10
-SUBLEVEL = 81
-EXTRAVERSION = -windows-subsystem-for-android-20220207
+SUBLEVEL = 66
+EXTRAVERSION = -windows-subsystem-for-android-20220323
 NAME = Dare mighty things
 
 # *DOCUMENTATION*
